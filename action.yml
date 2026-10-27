@@ -1,0 +1,74 @@
+name: Sync Querio context
+description: Upload committed context files and publish them to a Querio workspace.
+inputs:
+  token:
+    description: Querio access token with workspace file read, write and delete permissions.
+    required: true
+  workspace-id:
+    description: Destination workspace in changeset mode.
+    required: true
+  api-url:
+    description: Querio API URL.
+    default: https://app.querio.ai
+  repository:
+    description: Stable repository identity recorded with the uploaded source.
+    default: ${{ github.repository }}
+  path:
+    description: Checked-out repository directory.
+    default: .
+  ref:
+    description: Local commit or ref to upload.
+    default: HEAD
+  config:
+    description: Repository-relative committed include/exclude configuration.
+    default: querio.toml
+outputs:
+  source-version:
+    description: Imported source snapshot.
+    value: ${{ steps.upload.outputs.source-version }}
+  canonical-version:
+    description: Published filesystem snapshot.
+    value: ${{ steps.upload.outputs.canonical-version }}
+runs:
+  using: composite
+  steps:
+    - name: Install Querio CLI
+      shell: bash
+      env:
+        QUERIO_INSTALL_DIR: ${{ runner.temp }}/querio-cli
+      run: |
+        set -euo pipefail
+        if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
+          printf 'Querio sync requires a Linux x64 runner.\n' >&2
+          exit 1
+        fi
+        curl -fsSL https://raw.githubusercontent.com/Querio-App/cli/main/install.sh | bash
+        printf '%s\n' "$QUERIO_INSTALL_DIR" >> "$GITHUB_PATH"
+    - id: upload
+      shell: bash
+      env:
+        QUERIO_ACCESS_TOKEN: ${{ inputs.token }}
+        QUERIO_WORKSPACE_ID: ${{ inputs.workspace-id }}
+        QUERIO_API_URL: ${{ inputs.api-url }}
+        SOURCE_REPOSITORY: ${{ inputs.repository }}
+        SOURCE_PATH: ${{ inputs.path }}
+        SOURCE_REF: ${{ inputs.ref }}
+        SOURCE_CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        : "${QUERIO_ACCESS_TOKEN:?A Querio access token is required}"
+        : "${QUERIO_WORKSPACE_ID:?A workspace ID is required}"
+
+        source_version=$(querio git upload --json \
+          --repo "$SOURCE_PATH" --ref "$SOURCE_REF" \
+          --config "$SOURCE_CONFIG" --repository "$SOURCE_REPOSITORY" \
+          | jq -er '.version | strings | select(test("^[A-Za-z0-9_-]+$"))')
+        current_version=$(querio git status --json \
+          | jq -er '.canonicalVersion | strings | select(test("^[A-Za-z0-9_-]+$"))')
+        canonical_version=$(querio git promote "$source_version" \
+          --expected-canonical "$current_version" --json \
+          | jq -er '.canonicalVersion | strings | select(test("^[A-Za-z0-9_-]+$"))')
+        {
+          printf 'source-version=%s\n' "$source_version"
+          printf 'canonical-version=%s\n' "$canonical_version"
+        } >> "$GITHUB_OUTPUT"
